@@ -1,5 +1,5 @@
 -- Description: check email addresses for pw leaks using v3 of hibp api
--- Version: 0.2.0
+-- Version: 0.2.1
 -- Keyring-Access: hibp
 -- Source: emails
 -- License: GPL-3.0
