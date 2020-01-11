@@ -23,7 +23,6 @@ function run(arg)
 
     local api_output = http_fetch_json(req)
     if last_err() then return end
-    debug(api_output)
 
     for idx = 1, #api_output
     do
