@@ -1,5 +1,5 @@
 -- Description: gathers subdomains via github
--- Version: 0.1.0
+-- Version: 0.2.0
 -- Keyring-Access: github
 -- Source: domains
 -- License: GPL-3.0
