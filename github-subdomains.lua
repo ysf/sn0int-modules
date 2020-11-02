@@ -10,38 +10,56 @@
 -- creds to gwen001
 
 -- Todos:
---      * loop through sorts + order
---      * add pagination
 --      * IGNORECASE Regexes & Redirects in http_fetch
+
+used_urls = {}
+found_subdomains = {}
+API_URL = 'https://api.github.com/search/code'
+session = http_mksession()
+
+
+function add_to_db(domain_id, subdomain)
+    if found_subdomains[subdomain] then return end
+    found_subdomains[subdomain] = 1
+    db_add('subdomain', {domain_id=domain_id, value=subdomain})
+end
+
 
 function to_raw_url(html_url)
     html_url = str_replace(html_url, 'https://github.com/', 'https://raw.githubusercontent.com/')
     return str_replace(html_url, '/blob/', '/')
 end
 
-function run(domain)
-    API_URL = 'https://api.github.com/search/code'
-    DOMAIN_REGEX = '(([0-9a-z_\\-\\.]+)\\.' .. str_replace(domain['value'], '.', '\\.') .. ')'
 
-    -- url = 'https://api.github.com/search/code?per_page=100&s=' + sort + '&type=Code&o=' + order + '&q=' + search + '&page=' + str(page)
+function fetch_user_content(raw_url)
+    if used_urls[raw_url] then return end
+    used_urls[raw_url] = 1
 
-    local creds = keyring('github')[1]
-    if not creds then
-        return 'github api key missing, please login and visit https://github.com/settings/tokens - no permissions required.'
+    debug("requesting raw user content "..raw_url)
+
+    local req = http_request(session, 'GET', raw_url, {
+        headers={authorization='token '..creds['access_key']},
+        binary=true,
+    })
+
+    local resp = http_fetch(req)
+    if last_err() then return end
+
+    local body = utf8_decode(resp['binary'])
+    if last_err() then
+        clear_err()
+        return nil
     end
 
-    local session = http_mksession()
-    local sort = 'indexed'
-    local order = 'desc'
-    local page = 1
+    return body
+end
 
+function github_search(domain, sort, order, page)
     local req = http_request(session, 'GET', API_URL, {
-        headers={
-            authorization='token '..creds['access_key']
-        },
+        headers={authorization='token '..creds['access_key']},
         query={
             type='Code',
-            q=domain['value'],
+            q='"'..domain..'"',
             per_page='100',
             s=sort,
             o=order,
@@ -49,41 +67,76 @@ function run(domain)
         }
     })
 
-    resp = http_fetch_json(req)
+    local resp = http_fetch(req)
     if last_err() then return end
 
-    if not resp['items'] or #resp['items'] == 0 then
-        return
+    local data = json_decode(resp['text'])
+    if last_err() then return end
+
+    local reset_time = resp['headers']['x-ratelimit-reset']
+    local remaining = resp['headers']['x-ratelimit-remaining']
+
+    local now = time_unix()
+    local reset_seconds = reset_time - now
+
+    ratelimit_throttle('github-search', remaining - 1, reset_seconds*1000)
+
+    info({reset_seconds=reset_seconds, reset_time=reset_time, remaining=remaining})
+
+    return data['items']
+end
+
+function run(domain)
+    local DOMAIN_REGEX = '(([0-9a-z_\\-\\.]+)\\.' .. str_replace(domain['value'], '.', '\\.') .. ')'
+
+    creds = keyring('github')[1]
+    if not creds then
+        return 'github api key missing, please login and visit https://github.com/settings/tokens - no permissions required.'
     end
 
-    used_urls = {}
-    items = resp['items']
-    found_subdomains = {}
+    local sort_order = {
+        { sort='indexed', order='desc' },
+        { sort='indexed', order='asc'  },
+        { sort='',        order='desc' },
+    }
 
-    for i = 1, #items do
-        item = items[i]
-        raw_url = to_raw_url(item['html_url'])
+    for o = 1, #sort_order do
 
-        if not used_urls[raw_url] then
-            req = http_request(session, 'GET', raw_url, {})
-            resp = http_fetch(req)
-            if last_err() then
-                warn("skipping "..raw_url.." due to error: "..last_err())
-                clear_err()
-            else
-                used_urls[raw_url] = 1
-                blob = resp['text']
-                subdomains = regex_find_all(DOMAIN_REGEX, blob)
+        local page = 0
+        local sort = sort_order[o]['sort']
+        local order = sort_order[o]['order']
 
-                for j = 1, #subdomains do
-                    candidate = subdomains[j][1]
-                    if not found_subdomains[candidate] then
-                        found_subdomains[candidate] = 1
-                        db_add('subdomain', {
-                            domain_id=domain['id'],
-                            value=candidate
-                        })
+        while true do
+            page = page + 1
+
+            if page > 10 then
+                break
+            end
+
+            info("requesting page "..page)
+
+            local items = github_search(domain['value'], sort, order, page)
+
+            if last_err() then return end
+
+            if not items or #items == 0 then return end
+
+            for i = 1, #items do
+                local raw_url = to_raw_url(items[i]['html_url'])
+                local body = fetch_user_content(raw_url)
+
+                if last_err() then
+                    warn("skipping "..raw_url.." due to error: "..last_err())
+                    clear_err()
+
+                elseif body then
+                    local subdomains = regex_find_all(DOMAIN_REGEX, body)
+
+                    for j = 1, #subdomains do
+                        add_to_db(domain['id'], subdomains[j][1])
                     end
+
+                    if last_err() then return end
                 end
             end
         end
